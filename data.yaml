@@ -1,0 +1,5 @@
+train: /Image-Annotation/train/images/ # Path to training images
+val: /Image-Annotation/train/images/ # Path to validation images (using training data for simplicity)
+test: /Image-Annotation/test/ # Path to test images
+nc: 2 # Number of classes (replace with your number of classes)
+names: ["supply_diffuser", "return_diffuser"] # Class names - replace with yours
