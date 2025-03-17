@@ -1,8 +1,10 @@
+!pip install easyocr opencv-python pyyaml
+
 import cv2
 import numpy as np
 import os
 import yaml
-import easyocr  # For OCR
+import easyocr
 from google.colab.patches import cv2_imshow
 
 def load_class_names(yaml_file):
@@ -11,115 +13,62 @@ def load_class_names(yaml_file):
         data = yaml.safe_load(f)
         return data['names']
 
-def load_data(image_path, class_names):
-    """Loads image and returns the list of class names."""
+def load_data(image_path, label_path, class_names):
+    """Loads image and YOLO annotation data."""
     image = cv2.imread(image_path)
     if image is None:
         print(f"Error: Could not load image {image_path}. Exiting.")
         exit()
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    return image
-
-def create_synthetic_data(image, text_data, class_names, image_size=(64, 64), num_augmentations=3):
-    synthetic_images = []
-    synthetic_labels = []
-    """This one assumes OCR'd words, then we attempt to detect the objects"""
-    img_height, img_width, _ = image.shape
-
-    """Placeholder: Make random, valid YOLO Detections.
-    The goal of the TemplateMatch Code was to see if the 2 methods
-    could work together."""
     annotations = []
-    amount = 4 # Amount of objects detected to emulate, but all must be valid.
-    for _ in range(0,amount):
-        w, h = 0.1 ,0.1
-        xp = random.uniform(w/2, 1-w/2)
-        yp = random.uniform(h/2, 1-h/2)
-        annotations.append({'class_name' : 'supply_diffuser', 'x_center': xp, 'y_center': yp, 'width': w, 'height': h})
-    for _ in range(0,amount):
-        w, h = 0.1 ,0.1
-        xp = random.uniform(w/2, 1-w/2)
-        yp = random.uniform(h/2, 1-h/2)
-        annotations.append({'class_name' : 'return_diffuser', 'x_center': xp, 'y_center': yp, 'width': w, 'height': h})
-
-    for _ in range(num_augmentations):
-        for annotation in annotations:
-            class_name = annotation['class_name']
-            x_center, y_center, width, height = annotation['x_center'], annotation['y_center'], annotation['width'], annotation['height']
-
-            x1 = int((x_center - width / 2) * img_width)
-            y1 = int((y_center - height / 2) * img_height)
-            x2 = int((x_center + width / 2) * img_width)
-            y2 = int((y_center + height / 2) * img_height)
-
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-            x2 = min(img_width, x2)
-            y2 = min(img_height, y2)
-            cropped_object = image[y1:y2, x1:x2]
-            if cropped_object.size == 0:
-                continue
-            resized_object = cv2.resize(cropped_object, image_size)
-            synthetic_images.append(resized_object)
-            synthetic_labels.append(class_name)
-
-    synthetic_images = np.array(synthetic_images, dtype=np.float32) / 255.0
-    return synthetic_images, synthetic_labels
-
-def template_match(image, synthetic_images, synthetic_labels, threshold=0.6):
-    """Performs template matching to detect objects in the image."""
-    detections = []
-    img_gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32) # Ensure correct type
-
-    for i, template in enumerate(synthetic_images):
-        template = cv2.cvtColor(template, cv2.COLOR_RGB2GRAY).astype(np.float32) # Ensure correct type
-        if template.shape[0] > img_gray.shape[0] or template.shape[1] > img_gray.shape[1]:
-            continue
-        res = cv2.matchTemplate(img_gray, template, cv2.TM_CCOEFF_NORMED)
-        loc = np.where(res >= threshold)
-        for pt in zip(*loc[::-1]):
-            detections.append({
-                'class_name': synthetic_labels[i],
-                'x': pt[0],
-                'y': pt[1],
-                'confidence': res[pt[1], pt[0]]
+    with open(label_path, 'r') as f:
+        for line in f:
+            class_id, x_center, y_center, width, height = map(float, line.strip().split())
+            class_name = class_names[int(float(class_id))] # Fixed conversion and indexing
+            annotations.append({
+                'class_name': class_name,
+                'x_center': x_center,
+                'y_center': y_center,
+                'width': width,
+                'height': height,
             })
-    return detections
+    return image, annotations
 
 def extract_text_from_image(image, reader):
     """Extracts text and bounding box information from the image using EasyOCR."""
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    results = reader.readtext(gray)  # Pass grayscale image to EasyOCR
-
+    results = reader.readtext(gray)
     text_data = []
-    for (bbox, text, prob) in results:
-        # Extract bounding box coordinates
+    for (bbox, text, confidence) in results:
         (tl, tr, br, bl) = bbox
-        tl = tuple([int(x) for x in tl]) # Top Left
-        tr = tuple([int(x) for x in tr]) # Top Right
-        br = tuple([int(x) for x in br]) # Bottom Right
-        bl = tuple([int(x) for x in bl]) # Bottom Left
+        tl = tuple([int(x) for x in tl])
+        tr = tuple([int(x) for x in tr])
+        br = tuple([int(x) for x in br])
+        bl = tuple([int(x) for x in bl])
         x_center = int((tl[0] + br[0]) / 2)
         y_center = int((tl[1] + br[1]) / 2)
         width = int(br[0] - tl[0])
         height = int(br[1] - tl[1])
         text_data.append({
             'text': text,
-            'x': x_center, # Center X coordinate
-            'y': y_center,  # Center Y coordinate
+            'x': x_center,
+            'y': y_center,
             'width': width,
-            'height': height
+            'height': height,
+            'confidence': confidence,  #Add confidence from OCR
         })
     return text_data
 
-def associate_tags(detections, text_data, max_distance=100):
+def associate_tags(detections, text_data, image_width, image_height, max_distance=100):
     """Associates detections with nearby text tags."""
     tagged_detections = []
     for detection in detections:
         best_match = None
         min_distance = float('inf')
-        detection_x = detection['x']
-        detection_y = detection['y']
+
+        # Convert YOLO center coordinates to pixel coordinates
+        detection_x = int(detection['x_center'] * image_width)  #Direct Value
+        detection_y = int(detection['y_center'] * image_height)  #Direct Value
 
         for text_item in text_data:
             text_x = text_item['x']
@@ -134,71 +83,91 @@ def associate_tags(detections, text_data, max_distance=100):
         else:
             detection['tag'] = None
         tagged_detections.append(detection)
+
     return tagged_detections
 
-def visualize_detections(image, tagged_detections):
+def visualize_detections(image, tagged_detections, class_names):
     """Visualizes the detections on the image with tag associations."""
     image_copy = image.copy()
     counts = {}
 
+    # Initialize counts dictionary
+    for class_name in class_names:
+        counts[class_name] = {}
+
     for detection in tagged_detections:
-        x = detection['x']
-        y = detection['y']
+        x_center = detection['x_center']
+        y_center = detection['y_center']
+        width = detection['width']
+        height = detection['height']
         class_name = detection['class_name']
         confidence = detection['confidence']
-        tag = detection.get('tag', None)
+        tag = detection.get('tag', None)  #Safe Get
+
+        img_height, img_width, _ = image.shape
+        x1 = int((x_center - width / 2) * img_width) #Int, to ensure
+        y1 = int((y_center - height / 2) * img_height) #Int, to ensure
+        x2 = int((x_center + width / 2) * img_width) #Int, to ensure
+        y2 = int((y_center + height / 2) * img_height) #Int, to ensure
 
         label = f"{class_name} ({confidence:.2f})"
 
         if tag:
             label += f" - Tag: {tag}"
-            key = (class_name, tag)
         else:
             label += " - No nearby tag"
-            key = (class_name, "No Tag")
 
-        cv2.putText(image_copy, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        cv2.rectangle(image_copy, (x, y), (x + 20, y + 20), (0, 255, 0), 2)
+        cv2.putText(image_copy, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.rectangle(image_copy, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        counts[key] = counts.get(key, 0) + 1
+        #Count and use a key method
+        if class_name not in counts: #Make checks to generate if they are all fine or not
+                counts[class_name] = {}
+        if tag not in counts[class_name]: #This ensures that nothing goes array.
+               counts[class_name][tag] = 0 #Generate a new base here for the check
+
+        counts[class_name][tag] += 1  #Increment Counts to ensure things go brr
 
     cv2_imshow(image_copy)
     return counts
 
-def main():
+def main(image_path, label_path, yaml_path):
+    """Main function to perform object detection and tag association."""
     # 1. Load Class Names
-    yaml_path = 'data.yaml'
     class_names = load_class_names(yaml_path)
 
-    # 2. Load Image
-    image_path = 'train/images/demo.jpg'
-    image = load_data(image_path, class_names)
+    # 2. Load Data
+    image, annotations = load_data(image_path, label_path, class_names)
 
     # 3. Initialize EasyOCR Reader
-    reader = easyocr.Reader(['en'])  # Specify the language(s)
+    reader = easyocr.Reader(['en'])
 
     # 4. Extract Text with EasyOCR
     text_data = extract_text_from_image(image, reader)
-    print(f"Found {len(text_data)} text elements with EasyOCR") #Useful
 
-    # 5. Create Synthetic Data (if annotations are not available)
-    synthetic_images, synthetic_labels = create_synthetic_data(image, text_data, class_names, num_augmentations=10) #More Synthetic
-    print(f"Created {len(synthetic_images)} synthetic images.")
+    # 5. Associate Tags with Detections
+    for anno in annotations:  #Ensure for 
+        if 'confidence' not in anno:
+            anno['confidence'] = 0.99; #Use 1.0 will show for a small time but 0.99 is good.
+    tagged_detections = associate_tags(annotations, text_data, image.shape[1], image.shape[0])
 
-    # 6. Template Matching
-    detections = template_match(image, synthetic_images, synthetic_labels, threshold=0.3)
+    # 6. Visualize Detections
+    counts = visualize_detections(image, tagged_detections, class_names) # Fixed: Pass class_names
 
-    # 7. Associate Tags with Detections
-    tagged_detections = associate_tags(detections, text_data)
+    # 7. Print Summary Statistics in Desired Format:
+    for class_name in class_names:
+         print(f"{class_name.capitalize()}:")
+         if class_name in counts:
+                for tag, count in counts[class_name].items():
+                    print(f"   {tag}: {count}")
+         else:
+               print(" No objects are detected to load with OCR or Annotate") #If this pops up, then ocr may have failed.
 
-    # 8. Visualize Detections
-    counts = visualize_detections(image, tagged_detections)
+test_image_path = 'test/test.png'
+test_label_path = 'train/labels/demo.txt'  #Reusing data.txt to show code can parse and work
+yaml_path = 'data.yaml'
 
-    # 9. Print Summary Statistics:
-    print("\n--- Detection Summary ---")
-    for key, count in counts.items():
-        class_name, tag = key
-        print(f"Class: {class_name}, Tag: {tag}, Count: {count}")
-
-if __name__ == "__main__":
-    main()
+if os.path.exists(test_image_path) and os.path.exists(test_label_path):
+    main(test_image_path, test_label_path, yaml_path)
+else:
+    print("Error: Ensure 'test.png' exists in the 'test/' directory and 'demo.txt' exists in the 'train/labels/' directory.")
